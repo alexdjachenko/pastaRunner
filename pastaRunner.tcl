@@ -1,100 +1,143 @@
-# pastaRunner.tcl - Tcl пакет для удобного запуска консольных команд
-package provide pastaRunner 1.0
+oo::class create pastaRunner {
+    variable envVars
+    variable workingDir
+    variable debugMode
+    variable strictExitCode
+    variable strictStderr
+    variable mergeStderr
+    variable shellCmd
 
-namespace eval pastaRunner {
-    variable defaults
-    array set defaults {
-        env {}
-        cwd ""
-        strict false
-        debug false
+    constructor {} {
+        #set envVars [array create]
+        #set envVars {} # Используем словарь вместо массива
+        set envVars [dict create]
+        set workingDir ""
+        set debugMode 0
+        set strictExitCode 0
+        set strictStderr 0
+        set mergeStderr 0
+        set shellCmd ""   ;# По умолчанию выполняем напрямую, без shell
     }
-}
 
-proc pastaRunner::new {} {
-    set obj [namespace current]::[incr ::pastaRunner::counter]
-    namespace eval $obj {
-        variable env {}
-        variable cwd ""
-        variable strict false
-        variable debug false
-        variable last_output ""
-        variable last_error ""
-        variable last_exit_code 0
+    method configure {option value} {
+        switch -- $option {
+            env {
+                # array set envVars $value
+                # set envVars $value # Ожидаем словарь
+                #if {![dict exists $value]} {
+                #  error "Invalid dict format for envVars"
+                #}
+                #set envVars $value   ;# Теперь `envVars` корректно хранит словарь
+                
+                if {[catch {dict size $value}]} {
+                    error "Invalid dict format for envVars"
+                }
+                set envVars $value
+                
+            }
+            cwd {
+                set workingDir $value
+            }
+            debug {
+                set debugMode $value
+            }
+            strictExitCode {
+                set strictExitCode $value
+            }
+            strictStderr {
+                set strictStderr $value
+            }
+            mergeStderr {
+                set mergeStderr $value
+            }
+            shell {
+                set shellCmd $value  ;# Можно установить оболочку (например, /bin/bash)
+            }
+            default {
+                error "Unknown option: $option"
+            }
+        }
     }
-    return $obj
-}
 
-proc CmdRunner::configure {obj args} {
-    foreach {key val} $args {
-        if {[info exists ${obj}::$key]} {
-            set ${obj}::$key $val
+    method run {command} {
+        set envBackup [array get ::env]
+
+        ## Применяем переменные окружения
+        #foreach {key val} [array get envVars] {
+        #    set ::env($key) $val
+        #}
+        # Применяем переменные окружения
+        dict for {key val} $envVars {
+            set ::env($key) $val
+        }
+
+        # Устанавливаем рабочую директорию (если указана)
+        if {$workingDir ne ""} {
+            set prevDir [pwd]
+            cd $workingDir
+        }
+
+        # Отладочный вывод
+        if {$debugMode} {
+            puts "Executing: $command"
+            puts "Shell: $shellCmd"
+            puts "Working directory: [pwd]"
+            puts "Environment: [array get envVars]"
+            puts "Strict exit code: $strictExitCode, Strict stderr: $strictStderr, Merge stderr: $mergeStderr"
+        }
+        
+        # Выбираем, объединять ли stderr с stdout
+        if {$mergeStderr} {
+            set redirect "2>@1"
         } else {
-            return -code error "Unknown option: $key"
+            set redirect "2>@ stderrVar"
         }
-    }
-}
-
-proc CmdRunner::run {obj command} {
-    variable ${obj}::env
-    variable ${obj}::cwd
-    variable ${obj}::strict
-    variable ${obj}::debug
-    variable ${obj}::last_output
-    variable ${obj}::last_error
-    variable ${obj}::last_exit_code
-
-    set env_backup [array get ::env]
-    array set ::env $env
-    if {$cwd ne ""} {
-        set old_cwd [pwd]
-        cd $cwd
-    }
-
-    if {$debug} {
-        puts "Executing: $command"
-    }
-
-    set result [catch {exec {*}$command} output]
-    set last_output $output
-
-    if {$result} {
-        set last_error $output
-        set last_exit_code $::errorCode
-        if {$strict} {
-            return -code error "Command failed: $command\nError: $output"
+        
+        # Если выбран shell, запускаем команду через него
+        if {$shellCmd ne ""} {
+            set execCommand [list $shellCmd -c $command]
+        } else {
+            set execCommand [concat $command]
         }
-    } else {
-        set last_exit_code 0
+        
+        
+        # Выполняем команду и ловим ошибки
+        set exitCode [catch {set output [exec {*}$command $redirect]} errorMsg options]
+
+        ## Восстанавливаем окружение
+        #array set ::env $envBackup
+        # Восстанавливаем окружение
+        dict for {key val} $envBackup {
+          set ::env($key) $val
+        }
+
+        # Восстанавливаем рабочую директорию
+        if {$workingDir ne ""} {
+            cd $prevDir
+        }
+
+        # Получаем код возврата процесса
+        set realExitCode [dict get $options -code]
+
+        # Если stderr не объединен, получаем его содержимое
+        if {!$mergeStderr} {
+            upvar stderrVar stderrOutput
+        } else {
+            set stderrOutput ""
+        }
+
+        # Отладочный вывод
+        if {$debugMode} {
+            puts "Exit code: $realExitCode"
+            puts "Stderr: $stderrOutput"
+        }
+
+        # Обрабатываем ошибки в зависимости от режима
+        if {($strictExitCode && $realExitCode != 0) || ($strictStderr && $stderrOutput ne "")} {
+            error "Command failed: $command\nExit code: $realExitCode\nStderr: $stderrOutput"
+        }
+
+        # Возвращаем результат как список [stdout stderr exitCode]
+        return [list $output $stderrOutput $realExitCode]
     }
-
-    array set ::env $env_backup
-    if {[info exists old_cwd]} {
-        cd $old_cwd
-    }
-
-    return $last_output
-}
-
-proc CmdRunner::get_env {obj var} {
-    if {[info exists ${obj}::env($var)]} {
-        return ${obj}::env($var)
-    }
-    return ""
-}
-
-proc CmdRunner::set_env {obj var value} {
-    set ${obj}::env($var) $value
-}
-
-proc CmdRunner::get_last_output {obj} {
-    return ${obj}::last_output
-}
-
-proc CmdRunner::get_last_error {obj} {
-    return ${obj}::last_error
-}
-
-proc CmdRunner::get_last_exit_code {obj} {
-    return ${obj}::last_exit_code
 }
