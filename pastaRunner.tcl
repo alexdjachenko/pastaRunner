@@ -1,3 +1,8 @@
+#!/usr/bin/tclsh
+
+# Class for run commands
+package provide "pastaRunner" 1.0
+
 oo::class create pastaRunner {
     variable envVars
     variable workingDir
