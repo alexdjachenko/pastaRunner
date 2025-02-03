@@ -107,8 +107,13 @@ oo::class create pastaRunner {
         
         
         # Выполняем команду и ловим ошибки
-        set exitCode [catch {set output [exec {*}$command $redirect]} errorMsg options]
-
+        set output ""
+        set stderrOutput ""
+        set exitCode [catch {
+            set output [exec {*}$execCommand $redirect]
+        } errorMsg options]
+        
+        
         ## Восстанавливаем окружение
         #array set ::env $envBackup
         # Восстанавливаем окружение
@@ -126,9 +131,7 @@ oo::class create pastaRunner {
 
         # Если stderr не объединен, получаем его содержимое
         if {!$mergeStderr} {
-            upvar stderrVar stderrOutput
-        } else {
-            set stderrOutput ""
+            set stderrOutput $errorMsg
         }
 
         # Отладочный вывод
