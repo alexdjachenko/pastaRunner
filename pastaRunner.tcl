@@ -9,6 +9,7 @@ oo::class create pastaRunner {
     variable debugMode
     variable strictExitCode
     variable strictStderr
+    variable strictStdout
     variable mergeStderr
     variable shellCmd
 
@@ -18,8 +19,11 @@ oo::class create pastaRunner {
         set envVars [dict create]
         set workingDir ""
         set debugMode 0
-        set strictExitCode 0
+        set strictExitCode 1
+        # Выдать ошибку, если stderr непуст
         set strictStderr 0
+        # Выдать ошибку, если stdout пуст
+        set strictStdout 0
         set mergeStderr 0
         set shellCmd ""   ;# По умолчанию выполняем напрямую, без shell
     }
@@ -52,6 +56,9 @@ oo::class create pastaRunner {
             strictStderr {
                 set strictStderr $value
             }
+            strictStdout {
+                set strictStdout $value
+            }
             mergeStderr {
                 set mergeStderr $value
             }
@@ -81,37 +88,50 @@ oo::class create pastaRunner {
             set prevDir [pwd]
             cd $workingDir
         }
-
-        # Отладочный вывод
-        if {$debugMode} {
-            puts "Executing: $command"
-            puts "Shell: $shellCmd"
-            puts "Working directory: [pwd]"
-            puts "Environment: [array get envVars]"
-            puts "Strict exit code: $strictExitCode, Strict stderr: $strictStderr, Merge stderr: $mergeStderr"
-        }
         
         # Выбираем, объединять ли stderr с stdout
         if {$mergeStderr} {
-            set redirect "2>@1"
+            set redirect "2>&1"
         } else {
-            set redirect "2>@ stderrVar"
+            set redirect ""
         }
         
         # Если выбран shell, запускаем команду через него
         if {$shellCmd ne ""} {
             set execCommand [list $shellCmd -c $command]
+            # Добавляем команду для редиректа в конке только для варианта с shell
+            # т.к. без shell эта магия не работает
+            # Однако, если команда возвращает ненулевой код ошибки, $output все-равно будет пустым
+            lappend execCommand " $redirect"
         } else {
-            set execCommand [concat $command]
+            # Если мы не используем shell, просто используем то, что нам передали и положимся на то, что команду подготовили правильно,
+            # в виде списка
+            set execCommand $command
         }
         
+        # Отладочный вывод
+        if {$debugMode} {
+            puts "Executing: $command"
+            puts "Shell: $shellCmd"
+            puts "ExecCommand $execCommand"
+            puts "Working directory: [pwd]"
+            puts "Environment: [array get envVars]"
+            puts "Strict exit code: $strictExitCode, Strict stderr: $strictStderr, Merge stderr: $mergeStderr"
+        }
         
-        # Выполняем команду и ловим ошибки
+        # Документация по exec https://wiki.tcl-lang.org/page/exec
+        # Сбрасываем сообщения об ошибках, чтобы в $::errorInfo не было мусора
+        # На всякий случай объявляем остальные переменные, чтобы не было ошибок их отсутствия
+        set ::errorInfo ""
+        set ::errorCode ""
         set output ""
-        set stderrOutput ""
+        set errorMsg ""
+        set options ""
+        # Выполняем команду и ловим ошибки
+        
         set exitCode [catch {
-            set output [exec {*}$execCommand $redirect]
-        } errorMsg options]
+              set output [exec {*}$execCommand]
+            } errorMsg options]
         
         
         ## Восстанавливаем окружение
@@ -129,23 +149,33 @@ oo::class create pastaRunner {
         # Получаем код возврата процесса
         set realExitCode [dict get $options -code]
 
-        # Если stderr не объединен, получаем его содержимое
-        if {!$mergeStderr} {
-            set stderrOutput $errorMsg
-        }
-
         # Отладочный вывод
         if {$debugMode} {
-            puts "Exit code: $realExitCode"
-            puts "Stderr: $stderrOutput"
+            # Числовой код ошибки. Если всё хорошо - 0
+            puts "exitCode: $exitCode"
+            puts "realExitCode: $realExitCode"
+            # Текстовый вывод команды, если он был. При ошибке может отсутствовать, т.к всё идет в поток ошибок
+            puts "Output: $output"
+            puts "---"
+            # Сообщение об ошибке или дублирует текстовый вывод.
+            # На это поле не надо ориентироваться при определении ошибок выполнения
+            puts "errorMsg: $errorMsg"
+            puts "::errorCode: $::errorCode"
+            puts "::errorInfo: $::errorInfo"
+            puts "---"
         }
 
         # Обрабатываем ошибки в зависимости от режима
-        if {($strictExitCode && $realExitCode != 0) || ($strictStderr && $stderrOutput ne "")} {
-            error "Command failed: $command\nExit code: $realExitCode\nStderr: $stderrOutput"
+        if {($strictExitCode && $realExitCode != 0) 
+          || ($strictStderr && $::errorInfo ne "")
+          || ($strictStdout && $output eq "") } {
+            set errMsg "Command failed: $command\nExit code: $realExitCode\nOutput: $output\nmsg: $errorMsg\nStderr: $::errorInfo"
+            error $errMsg
+            # error "Command failed: $command\nExit code: $realExitCode\nOutput: $output\nmsg: $errorMsg\nStderr:$::errorInfo"
         }
+        
 
         # Возвращаем результат как список [stdout stderr exitCode]
-        return [list $output $stderrOutput $realExitCode]
+        return [list $realExitCode $output $errorMsg $::errorInfo]
     }
 }
